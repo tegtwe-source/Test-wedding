@@ -1,9 +1,6 @@
 import { useState, useEffect } from 'react'
 import Head from 'next/head'
 import Link from 'next/link'
-import { db, storage } from '../lib/firebase'
-import { collection, query, orderBy, limit, getDocs } from 'firebase/firestore'
-import { ref, getDownloadURL, listAll } from 'firebase/storage'
 
 // ── EDIT THESE TO MATCH YOUR WEDDING ──────────────────────────────────────────
 const WEDDING_DATE = new Date('2026-09-05T16:00:00')
@@ -43,19 +40,10 @@ export default function Home() {
   const [photos, setPhotos] = useState([])
 
   useEffect(() => {
-    async function loadPreviewPhotos() {
-      try {
-        const listRef = ref(storage, 'gallery')
-        const res = await listAll(listRef)
-        const urls = await Promise.all(
-          res.items.slice(0, 6).map(item => getDownloadURL(item))
-        )
-        setPhotos(urls)
-      } catch {
-        // Firebase not configured yet or no photos — silent fail
-      }
-    }
-    loadPreviewPhotos()
+    fetch('/api/photos')
+      .then(r => r.json())
+      .then(data => setPhotos((data.photos || []).slice(0, 6)))
+      .catch(() => {})
   }, [])
 
   const weddingDateStr = WEDDING_DATE.toLocaleDateString('en-US', {
@@ -135,8 +123,8 @@ export default function Home() {
           <>
             <h2 className="section-title">Photos</h2>
             <div className="photo-strip">
-              {photos.map((url, i) => (
-                <img key={i} src={url} alt="" loading="lazy" />
+              {photos.map((photo, i) => (
+                <img key={i} src={photo.url} alt="" loading="lazy" />
               ))}
             </div>
             <div style={{ textAlign: 'center', marginTop: '1.2rem' }}>

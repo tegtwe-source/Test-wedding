@@ -1,7 +1,5 @@
 import { useState } from 'react'
 import Head from 'next/head'
-import { db } from '../lib/firebase'
-import { collection, addDoc, serverTimestamp } from 'firebase/firestore'
 
 const MEAL_OPTIONS = ['Chicken', 'Fish', 'Vegetarian', 'Vegan']
 
@@ -25,11 +23,12 @@ export default function RSVP() {
     e.preventDefault()
     setStatus('submitting')
     try {
-      await addDoc(collection(db, 'rsvps'), {
-        ...form,
-        guests: parseInt(form.guests, 10),
-        submittedAt: serverTimestamp(),
+      const res = await fetch('/api/rsvp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(form),
       })
+      if (!res.ok) throw new Error('Server error')
       setStatus('success')
     } catch (err) {
       console.error(err)

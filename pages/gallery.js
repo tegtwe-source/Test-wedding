@@ -1,7 +1,5 @@
 import { useState, useEffect } from 'react'
 import Head from 'next/head'
-import { storage } from '../lib/firebase'
-import { ref, listAll, getDownloadURL, getMetadata } from 'firebase/storage'
 
 export default function Gallery() {
   const [photos, setPhotos] = useState([])
@@ -9,26 +7,11 @@ export default function Gallery() {
   const [lightbox, setLightbox] = useState(null)
 
   useEffect(() => {
-    async function load() {
-      try {
-        const listRef = ref(storage, 'gallery')
-        const res = await listAll(listRef)
-        const items = await Promise.all(
-          res.items.map(async item => {
-            const [url, meta] = await Promise.all([getDownloadURL(item), getMetadata(item)])
-            return { url, name: item.name, time: meta.timeCreated }
-          })
-        )
-        // Newest first
-        items.sort((a, b) => new Date(b.time) - new Date(a.time))
-        setPhotos(items)
-      } catch (err) {
-        console.error('Gallery load error:', err)
-      } finally {
-        setLoading(false)
-      }
-    }
-    load()
+    fetch('/api/photos')
+      .then(r => r.json())
+      .then(data => setPhotos(data.photos || []))
+      .catch(() => {})
+      .finally(() => setLoading(false))
   }, [])
 
   useEffect(() => {
@@ -61,7 +44,7 @@ export default function Gallery() {
         {photos.length > 0 && (
           <div className="gallery-grid">
             {photos.map((photo, i) => (
-              <div key={photo.name} className="gallery-item" onClick={() => setLightbox(i)}>
+              <div key={photo.key} className="gallery-item" onClick={() => setLightbox(i)}>
                 <img src={photo.url} alt="" loading="lazy" />
               </div>
             ))}

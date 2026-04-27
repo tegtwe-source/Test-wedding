@@ -1,48 +1,30 @@
 import { useState, useRef, useCallback } from 'react'
 import Head from 'next/head'
-import { storage } from '../lib/firebase'
-import { ref, uploadBytesResumable, getDownloadURL } from 'firebase/storage'
 
 const UPLOAD_PASSWORD = process.env.NEXT_PUBLIC_UPLOAD_PASSWORD || ''
-
 const ACCEPTED = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/heic']
 const MAX_MB = 20
-
-function sanitizeFilename(name) {
-  return name.replace(/[^a-zA-Z0-9._-]/g, '_')
-}
 
 export default function Upload() {
   const [authed, setAuthed] = useState(!UPLOAD_PASSWORD)
   const [pwInput, setPwInput] = useState('')
   const [pwError, setPwError] = useState(false)
 
-  const [files, setFiles] = useState([]) // { file, preview, progress, status, url }
+  const [files, setFiles] = useState([]) // { file, preview, progress, status }
   const [dragover, setDragover] = useState(false)
   const [uploaderName, setUploaderName] = useState('')
-  const [globalStatus, setGlobalStatus] = useState(null) // 'uploading' | 'done' | 'error'
+  const [globalStatus, setGlobalStatus] = useState(null) // 'uploading' | 'done'
   const inputRef = useRef()
 
   function checkPassword(e) {
     e.preventDefault()
-    if (pwInput === UPLOAD_PASSWORD) {
-      setAuthed(true)
-    } else {
-      setPwError(true)
-    }
+    if (pwInput === UPLOAD_PASSWORD) { setAuthed(true) } else { setPwError(true) }
   }
 
   function addFiles(rawFiles) {
     const incoming = Array.from(rawFiles)
-      .filter(f => ACCEPTED.includes(f.type))
-      .filter(f => f.size <= MAX_MB * 1024 * 1024)
-      .map(file => ({
-        file,
-        preview: URL.createObjectURL(file),
-        progress: 0,
-        status: 'pending',
-        url: null,
-      }))
+      .filter(f => ACCEPTED.includes(f.type) && f.size <= MAX_MB * 1024 * 1024)
+      .map(file => ({ file, preview: URL.createObjectURL(file), progress: 0, status: 'pending' }))
     setFiles(prev => [...prev, ...incoming])
   }
 
@@ -59,51 +41,53 @@ export default function Upload() {
     })
   }
 
+  async function uploadOne(item, idx) {
+    // 1. Get a presigned URL from our server-side API route
+    const presignRes = await fetch('/api/presign', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        filename: item.file.name,
+        contentType: item.file.type,
+        fileSize: item.file.size,
+        uploaderName,
+      }),
+    })
+    if (!presignRes.ok) throw new Error('Could not get upload URL')
+    const { url } = await presignRes.json()
+
+    // 2. PUT the file directly to R2 using the presigned URL
+    await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest()
+      xhr.open('PUT', url)
+      xhr.setRequestHeader('Content-Type', item.file.type)
+
+      xhr.upload.onprogress = e => {
+        if (e.lengthComputable) {
+          const pct = Math.round((e.loaded / e.total) * 100)
+          setFiles(prev => prev.map((f, i) => i === idx ? { ...f, progress: pct, status: 'uploading' } : f))
+        }
+      }
+      xhr.onload = () => xhr.status < 300 ? resolve() : reject(new Error(`R2 error ${xhr.status}`))
+      xhr.onerror = () => reject(new Error('Network error'))
+      xhr.send(item.file)
+    })
+
+    setFiles(prev => prev.map((f, i) => i === idx ? { ...f, status: 'done', progress: 100 } : f))
+  }
+
   async function uploadAll() {
     if (files.length === 0) return
     setGlobalStatus('uploading')
-
-    const uploads = files.map((item, idx) => {
-      const filename = `${Date.now()}_${sanitizeFilename(item.file.name)}`
-      const path = uploaderName
-        ? `gallery/${uploaderName.replace(/[^a-zA-Z0-9]/g, '_')}_${filename}`
-        : `gallery/${filename}`
-      const storageRef = ref(storage, path)
-
-      return new Promise((resolve, reject) => {
-        const task = uploadBytesResumable(storageRef, item.file, {
-          contentType: item.file.type,
-          customMetadata: { uploaderName: uploaderName || 'Anonymous' },
-        })
-
-        task.on(
-          'state_changed',
-          snap => {
-            const pct = Math.round((snap.bytesTransferred / snap.totalBytes) * 100)
-            setFiles(prev => prev.map((f, i) => i === idx ? { ...f, progress: pct, status: 'uploading' } : f))
-          },
-          err => {
-            setFiles(prev => prev.map((f, i) => i === idx ? { ...f, status: 'error' } : f))
-            reject(err)
-          },
-          async () => {
-            const url = await getDownloadURL(task.snapshot.ref)
-            setFiles(prev => prev.map((f, i) => i === idx ? { ...f, status: 'done', url, progress: 100 } : f))
-            resolve(url)
-          }
-        )
-      })
-    })
-
-    try {
-      await Promise.allSettled(uploads)
-      setGlobalStatus('done')
-    } catch {
-      setGlobalStatus('error')
-    }
+    await Promise.allSettled(files.map((item, idx) =>
+      uploadOne(item, idx).catch(() =>
+        setFiles(prev => prev.map((f, i) => i === idx ? { ...f, status: 'error' } : f))
+      )
+    ))
+    setGlobalStatus('done')
   }
 
-  // ── Password gate ────────────────────────────────────────────────────────────
+  // ── Password gate ──────────────────────────────────────────────────────────
   if (!authed) {
     return (
       <>
@@ -131,7 +115,7 @@ export default function Upload() {
     )
   }
 
-  // ── Upload UI ────────────────────────────────────────────────────────────────
+  // ── Upload UI ──────────────────────────────────────────────────────────────
   const allDone = files.length > 0 && files.every(f => f.status === 'done')
 
   return (
@@ -195,7 +179,10 @@ export default function Upload() {
                       {item.status === 'done' && (
                         <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.35)', borderRadius: 6, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: '1.4rem' }}>✓</div>
                       )}
-                      {(item.status === 'uploading' || item.status === 'pending') && globalStatus === 'uploading' && (
+                      {item.status === 'error' && (
+                        <div style={{ position: 'absolute', inset: 0, background: 'rgba(180,0,0,0.45)', borderRadius: 6, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: '1.4rem' }}>✗</div>
+                      )}
+                      {(item.status === 'uploading') && (
                         <div className="progress-bar-wrap">
                           <div className="progress-bar" style={{ width: `${item.progress}%` }} />
                         </div>
@@ -205,12 +192,10 @@ export default function Upload() {
                 </div>
 
                 <div style={{ marginTop: '1.5rem', maxWidth: 560 }}>
-                  <button
-                    className="btn"
-                    onClick={uploadAll}
-                    disabled={globalStatus === 'uploading'}
-                  >
-                    {globalStatus === 'uploading' ? 'Uploading…' : `Upload ${files.length} photo${files.length !== 1 ? 's' : ''}`}
+                  <button className="btn" onClick={uploadAll} disabled={globalStatus === 'uploading'}>
+                    {globalStatus === 'uploading'
+                      ? 'Uploading…'
+                      : `Upload ${files.length} photo${files.length !== 1 ? 's' : ''}`}
                   </button>
                 </div>
               </>
